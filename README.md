@@ -51,6 +51,31 @@ docker run -d -p 3000:3000 -e UUID=your-uuid -e ARGO_AUTH=your-token xray-argo
 | `GET /` | Liveness: returns `200 System Running` as soon as the HTTP server is up |
 | `GET /health` | Readiness: `200 {"status":"ok"}` only after Xray + cloudflared started; otherwise `503` with the current error |
 
+## Share Links / Subscription
+Once the app's HTTP port (default `3000`) is publicly reachable, open:
+
+```
+http://<public-host>:<PORT>/<UUID>
+```
+
+It returns a **base64 subscription** containing both a `vless://` and a `vmess://` link,
+which you can paste directly into v2rayN / v2rayNG / Clash / Shadowrocket.
+
+- `<UUID>` acts as the access token; a wrong UUID returns `404`.
+- Links use `ARGO_DOMAIN` as host. With a Quick Tunnel (no `ARGO_AUTH`), the
+  `*.trycloudflare.com` hostname is detected automatically.
+- Append `?raw=1` to get the plain (non-base64) links for debugging.
+
+Example decoded links:
+```
+vless://<UUID>@<ARGO_DOMAIN>:443?encryption=none&security=tls&sni=<ARGO_DOMAIN>&fp=chrome&type=ws&host=<ARGO_DOMAIN>&path=%2Fvless-argo#xray-argo
+vmess://<base64-json ... path=/vmess-argo ...>
+```
+
+> Note: this endpoint is served by the Node HTTP server (port 3000). Make sure your
+> platform/ingress exposes that port. The Cloudflare tunnel’s Public Hostname should
+> point to `localhost:8001` (Xray), which is separate from this subscription endpoint.
+
 Recommended Kubernetes probes (replace `3000` if you change `PORT`):
 
 ```yaml

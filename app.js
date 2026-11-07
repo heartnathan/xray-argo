@@ -83,6 +83,7 @@ const logPath = path.join(FILE_PATH, 'cloudflared.log');
 let xrayProc = null;
 let cfProc = null;
 let binariesReady = false; // 二進位檔只下載一次，重試只重啟進程
+let runtimeDomain = '';    // Quick Tunnel 時從 cloudflared 輸出抓到的 trycloudflare 域名
 
 function killProcs() {
   for (const [name, p] of [['xray', xrayProc], ['cloudflared', cfProc]]) {
@@ -186,7 +187,14 @@ async function startCloudflared(argoArgs) {
       const msg = data.toString();
       output += msg;
       console.log(`[cloudflared] ${msg.trim()}`);
-      
+
+      // Quick Tunnel：抓取 trycloudflare 域名，供訂閱連結使用
+      const m = msg.match(/https:\/\/([a-z0-9-]+\.trycloudflare\.com)/i);
+      if (m) {
+        runtimeDomain = m[1];
+        console.log(`Detected quick tunnel domain: ${runtimeDomain}`);
+      }
+
       if (msg.includes('Connected to Cloudflare') || 
           msg.includes('Starting tunnel') ||
           msg.includes('Registered tunnel')) {
@@ -353,9 +361,59 @@ app.get("/health", (req, res) => {
   }
 });
 
+// ===== 分享連結產生 =====
+function publicDomain() {
+  return (ARGO_DOMAIN || runtimeDomain || '').trim();
+}
+
+function buildVlessLink(domain) {
+  const path = encodeURIComponent('/vless-argo');
+  return `vless://${UUID}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&host=${domain}&path=${path}#xray-argo`;
+}
+
+function buildVmessLink(domain) {
+  const obj = {
+    v: '2', ps: 'xray-argo', add: domain, port: '443', id: UUID, aid: '0',
+    scy: 'auto', net: 'ws', type: 'none', host: domain,
+    path: '/vmess-argo', tls: 'tls', sni: domain, fp: 'chrome'
+  };
+  return 'vmess://' + Buffer.from(JSON.stringify(obj)).toString('base64');
+}
+
+function buildLinks() {
+  const domain = publicDomain();
+  return { domain, vless: buildVlessLink(domain), vmess: buildVmessLink(domain) };
+}
+
+// 訪問 /<UUID> 回傳 base64 訂閱（VLESS + VMess），可直接貼進 v2rayN/Clash 等
+app.get('/:uuid', (req, res) => {
+  // UUID 當作存取權杖；不符就 404，避免洩露
+  if (req.params.uuid !== UUID) {
+    return res.status(404).type('text/plain').send('Not Found');
+  }
+
+  const { domain, vless, vmess } = buildLinks();
+  if (!domain) {
+    return res.status(503).type('text/plain').send(
+      'Domain not ready. Set ARGO_DOMAIN, or wait for the quick tunnel to connect.'
+    );
+  }
+
+  const plain = [vless, vmess].join('\n');
+
+  // ?raw=1 直接回明文連結，方便除錯
+  if (req.query.raw === '1') {
+    return res.type('text/plain').send(plain);
+  }
+
+  // 預設回 base64 訂閱內容
+  res.type('text/plain').send(Buffer.from(plain).toString('base64'));
+});
+
 // 明確綁定 0.0.0.0，確保 K8s/docker 的 IPv4 probe 可連線
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server is listening on 0.0.0.0:${PORT}`);
+  console.log(`Subscription URL: http://<public-host>:${PORT}/<UUID>`);
   generateConfig()
     .then(boot)
     .catch((e) => console.error('Boot error:', e.message));
