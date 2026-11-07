@@ -213,26 +213,20 @@ async function startScripts() {
     const isTokenMode = ARGO_AUTH.includes('{') || ARGO_AUTH.length > 100;
     
     if (isTokenMode) {
-      // Token 模式 - 檢查是否為空
-      if (!authTrimmed) {
-        console.error('ARGO_AUTH is empty! Token mode requires ARGO_AUTH environment variable.');
-        console.error('Set ARGO_AUTH=eyJ... (JWT token from Cloudflare Dashboard)');
-        process.exit(1);
-      }
-      // 直接用已計算的值驗證
-      if (authParts.length !== 3) {
-        console.error(`ARGO_AUTH validation failed: Invalid JWT format: expected 3 parts, got ${authParts.length}`);
-        console.error('Expected: JWT token (eyJ...) from Cloudflare Dashboard');
-        process.exit(1);
-      }
-      for (const part of authParts) {
-        if (!/^[A-Za-z0-9_-]+$/.test(part)) {
-          console.error('ARGO_AUTH validation failed: Invalid JWT character in token');
+      // Token 模式 - Cloudflare 官方使用 base64 編碼 JSON credentials（非 JWT）
+      // 驗證：嘗試 base64 解碼確認格式正確
+      try {
+        const decoded = Buffer.from(authTrimmed, 'base64').toString('utf8');
+        if (!decoded.includes('TunnelSecret') || !decoded.includes('TunnelID')) {
+          console.error('ARGO_AUTH validation failed: decoded token missing TunnelSecret/TunnelID');
           process.exit(1);
         }
+      } catch (e) {
+        console.error('ARGO_AUTH validation failed: not valid base64 encoded credentials');
+        process.exit(1);
       }
       argoArgs = `tunnel --no-autoupdate run --token ${authTrimmed}`;
-      console.log('Mode: Permanent Tunnel (Token)');
+      console.log('Mode: Permanent Tunnel (Token - base64 credentials)');
     } else {
       // Quick Tunnel 模式
       argoArgs = `tunnel --no-autoupdate --url http://localhost:${ARGO_PORT}`;
