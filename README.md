@@ -40,10 +40,41 @@ docker run -d -p 3000:3000 -e UUID=your-uuid -e ARGO_AUTH=your-token xray-argo
 3. The service will automatically download binaries and start the tunnel
 
 ## Architecture
-- **Port 3000**: Main HTTP server (health check)
+- **Port 3000**: Main HTTP server (health check), bound to `0.0.0.0`
 - **Port 8001**: Xray VLESS TCP (with fallback to WebSocket)
 - **Port 3002**: VLESS WebSocket (`/vless-argo`)
 - **Port 3003**: VMess WebSocket (`/vmess-argo`)
+
+## Health Checks (Kubernetes / Docker)
+| Endpoint | Meaning |
+|----------|---------|
+| `GET /` | Liveness: returns `200 System Running` as soon as the HTTP server is up |
+| `GET /health` | Readiness: `200 {"status":"ok"}` only after Xray + cloudflared started; otherwise `503` with the current error |
+
+Recommended Kubernetes probes (replace `3000` if you change `PORT`):
+
+```yaml
+ports:
+  - containerPort: 3000
+livenessProbe:
+  httpGet:
+    path: /
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 30
+```
+
+Notes:
+- The container listens on `0.0.0.0`, so IPv4 pod probes can connect.
+- Startup failures no longer kill the process; the HTTP server stays up so you can read logs and `/health` instead of hitting a crash loop.
+- Startup is retried up to 5 times with a 5s delay.
 
 ## Binaries Source
 - Xray: https://github.com/XTLS/Xray-core/releases

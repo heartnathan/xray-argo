@@ -56,8 +56,15 @@ function debugArgoAuth() {
   return { raw, trimmed };
 }
 
-if (!fs.existsSync(FILE_PATH)) {
-  fs.mkdirSync(FILE_PATH, { recursive: true });
+// 服務狀態（供 /health 讀取）
+const serviceStatus = { started: false, error: null };
+
+try {
+  if (!fs.existsSync(FILE_PATH)) {
+    fs.mkdirSync(FILE_PATH, { recursive: true });
+  }
+} catch (e) {
+  console.error(`Warning: cannot create FILE_PATH (${FILE_PATH}): ${e.message}`);
 }
 
 function generateRandomName() {
@@ -235,17 +242,14 @@ async function startScripts() {
       try {
         decoded = Buffer.from(authTrimmed, 'base64').toString('utf8');
       } catch (e) {
-        console.error('ARGO_AUTH validation failed: not valid base64');
-        process.exit(1);
+        throw new Error('ARGO_AUTH validation failed: not valid base64');
       }
 
       let creds;
       try {
         creds = JSON.parse(decoded);
       } catch (e) {
-        console.error('ARGO_AUTH validation failed: decoded token is not valid JSON');
-        console.error(`Decoded preview: ${decoded.slice(0, 120)}`);
-        process.exit(1);
+        throw new Error(`ARGO_AUTH validation failed: decoded token is not valid JSON (preview: ${decoded.slice(0, 120)})`);
       }
 
       // 取出各欄位（兼容短鍵 a/t/s 與長鍵）
@@ -254,9 +258,7 @@ async function startScripts() {
       const tunnelSecret = creds.s || creds.TunnelSecret;
 
       if (!accountTag || !tunnelID || !tunnelSecret) {
-        console.error('ARGO_AUTH validation failed: missing a/t/s (or AccountTag/TunnelID/TunnelSecret)');
-        console.error(`Decoded keys: ${Object.keys(creds).join(', ')}`);
-        process.exit(1);
+        throw new Error(`ARGO_AUTH validation failed: missing a/t/s (decoded keys: ${Object.keys(creds).join(', ')})`);
       }
 
       console.log(`Token parsed OK: accountTag=${String(accountTag).slice(0,8)}... tunnelID=${tunnelID}`);
@@ -270,16 +272,51 @@ async function startScripts() {
     
     console.log('Starting cloudflared...');
     await startCloudflared(argoArgs);
+    serviceStatus.started = true;
+    serviceStatus.error = null;
     console.log("Services started successfully.");
   } catch (e) {
+    // 不退出進程，讓 HTTP 伺服器保持存活以回應健康檢查與提供日誌
+    serviceStatus.error = e.message;
     console.error("Startup error:", e.message);
-    process.exit(1);
+    throw e;
   }
+}
+
+// 啟動流程（含重試），避免暫時性網路/下載失敗直接卡死
+async function boot() {
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await startScripts();
+      return;
+    } catch (e) {
+      serviceStatus.error = e.message;
+      console.error(`Startup attempt ${attempt}/${maxAttempts} failed: ${e.message}`);
+      if (attempt < maxAttempts) {
+        console.log(`Retrying in 5s...`);
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+    }
+  }
+  console.error('All startup attempts failed. HTTP server stays up; /health returns 503.');
 }
 
 app.get("/", (req, res) => res.send("System Running"));
 
-app.listen(PORT, () => {
-  console.log(`Server is listening on port ${PORT}`);
-  generateConfig().then(startScripts);
+// /health：只有核心服務真的啟動成功才回 200
+app.get("/health", (req, res) => {
+  if (serviceStatus.started) {
+    res.status(200).json({ status: 'ok' });
+  } else {
+    res.status(503).json({ status: 'starting', error: serviceStatus.error });
+  }
+});
+
+// 明確綁定 0.0.0.0，確保 K8s/docker 的 IPv4 probe 可連線
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server is listening on 0.0.0.0:${PORT}`);
+  generateConfig()
+    .then(boot)
+    .catch((e) => console.error('Boot error:', e.message));
 });
