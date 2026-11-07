@@ -1,0 +1,17 @@
+{
+  "name": "xray-argo",
+  "version": "1.0.0",
+  "description": "Deploy Xray with Cloudflare Argo Tunnel on PaaS platforms",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "adm-zip": "^0.5.10"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

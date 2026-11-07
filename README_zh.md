@@ -1,18 +1,53 @@
-# Node.js Argo 部署工具
+# Xray 搭配 Cloudflare Argo 隧道
 
-本項目旨在 PaaS 平台上透過 Cloudflare Argo 隧道部署網路代理服務。
+在 PaaS 平台上部署 Xray (VLESS/VMess) 搭配 Cloudflare Argo 隧道。
 
-## 更新日誌
-- **移除哪吒探針**：已刪除所有與哪吒監控相關的程式碼與功能，保持系統精簡。
-- **Docker 優化**：採用 Alpine Linux 3.20，確保最小的映像檔體積。
+## 功能特點
+- **Xray 核心**：最新版 Xray (VLESS + VMess over WebSocket)
+- **Cloudflare Argo 隧道**：透過 cloudflared 建立安全隧道
+- **官方釋出檔**：直接從 GitHub Releases 下載 (XTLS/Xray-core, cloudflare/cloudflared)
+- **多架構支援**：AMD64 和 ARM64
+- **輕量化 Docker**：Node.js 20 Alpine 基礎映像
 
-## 環境變數說明
-- `UUID`：用於連接的唯一識別碼。
-- `ARGO_AUTH`：Cloudflare 隧道 Token（若不填寫則使用臨時隧道）。
-- `ARGO_DOMAIN`：Cloudflare 隧道DOMAIN（若不填寫則使用臨時隧道）。
-- `PORT`：伺服器監聽埠號（預設 3000）。
+## 環境變數
+| 變數 | 說明 | 預設值 |
+|------|------|--------|
+| `UUID` | 連線用 UUID | `9afd1229-b893-40c1-84dd-51e7ce204913` |
+| `ARGO_AUTH` | Cloudflare 隧道 Token (選填) | - |
+| `ARGO_DOMAIN` | Cloudflare 隧道域名 (選填) | - |
+| `PORT` | 伺服器監聽埠號 | `3000` |
+| `FILE_PATH` | 暫存檔案路徑 | `.tmp` |
+| `XRAY_VERSION` | 要下載的 Xray 版本 | `v26.10.31` |
+| `CLOUDFLARED_VERSION` | 要下載的 cloudflared 版本 | `2026.10.7` |
 
-## 部署步驟
-1. 將程式碼上傳至您的 PaaS 平台（如 Render, Heroku）。
-2. 設定上述環境變數。
-3. 程式啟動後會自動下載核心組件並建立隧道。
+## 執行方式
+
+### 本地開發
+```bash
+npm install
+npm start
+```
+
+### Docker
+```bash
+docker build -t xray-argo .
+docker run -d -p 3000:3000 -e UUID=your-uuid -e ARGO_AUTH=your-token xray-argo
+```
+
+### PaaS 部署 (Render, Heroku, Railway 等)
+1. 將儲存庫部署到您的 PaaS 平台
+2. 設定環境變數
+3. 服務會自動下載二進制檔並啟動隧道
+
+## 架構說明
+- **埠號 3000**：主 HTTP 伺服器 (健康檢查)
+- **埠號 8001**：Xray VLESS TCP (含 WebSocket 回落)
+- **埠號 3002**：VLESS WebSocket (`/vless-argo`)
+- **埠號 3003**：VMess WebSocket (`/vmess-argo`)
+
+## 二進制檔來源
+- Xray: https://github.com/XTLS/Xray-core/releases
+- cloudflared: https://github.com/cloudflare/cloudflared/releases
+
+## 授權條款
+MIT

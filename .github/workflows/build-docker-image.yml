@@ -5,7 +5,8 @@ on:
     branches: [ main ]
     paths:
       - 'Dockerfile'
-      - 'app.py'
+      - 'app.js'
+      - 'package.json'
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -37,10 +38,10 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/xrarpy:latest
+            ghcr.io/${{ github.repository_owner }}/xray-argo:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=Python Server
+            org.opencontainers.image.description=Xray with Cloudflare Argo Tunnel
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max
