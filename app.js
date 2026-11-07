@@ -26,20 +26,34 @@ function debugArgoAuth() {
   const len = raw.length;
   const trimmed = raw.trim();
   const trimmedLen = trimmed.length;
-  const parts = trimmed.split('.');
   const preview = len > 0 ? `${trimmed.slice(0, 15)}...${trimmed.slice(-10)}` : '(empty)';
-  
+
   console.log('=== ARGO_AUTH Debug ===');
   console.log(`Raw length: ${len}`);
   console.log(`Trimmed length: ${trimmedLen}`);
-  console.log(`Parts (split by .): ${parts.length}`);
   console.log(`Preview: ${preview}`);
   console.log(`Starts with eyJ: ${trimmed.startsWith('eyJ')}`);
   console.log(`Includes {: ${raw.includes('{')}`);
   console.log(`Length > 100: ${len > 100}`);
+
+  // 嘗試 base64 解碼（Cloudflare token 格式）
+  if (trimmed) {
+    try {
+      const decoded = Buffer.from(trimmed, 'base64').toString('utf8');
+      console.log(`Base64 decoded: ${decoded.slice(0, 120)}${decoded.length > 120 ? '...' : ''}`);
+      try {
+        const creds = JSON.parse(decoded);
+        console.log(`Decoded JSON keys: ${Object.keys(creds).join(', ')}`);
+      } catch (_) {
+        console.log('Decoded content is NOT valid JSON');
+      }
+    } catch (_) {
+      console.log('Base64 decode failed');
+    }
+  }
   console.log('=========================');
-  
-  return { raw, trimmed, parts };
+
+  return { raw, trimmed };
 }
 
 if (!fs.existsSync(FILE_PATH)) {
@@ -208,23 +222,44 @@ async function startScripts() {
     
     // 準備 cloudflared 參數
     let argoArgs;
-    // 使用 debugArgoAuth 回傳的 trimmed 和 parts，避免重複處理
-    const { trimmed: authTrimmed, parts: authParts } = debugArgoAuth();
+    // 使用 debugArgoAuth 回傳的 trimmed，避免重複處理
+    const { trimmed: authTrimmed } = debugArgoAuth();
     const isTokenMode = ARGO_AUTH.includes('{') || ARGO_AUTH.length > 100;
     
     if (isTokenMode) {
-      // Token 模式 - Cloudflare 官方使用 base64 編碼 JSON credentials（非 JWT）
-      // 驗證：嘗試 base64 解碼確認格式正確
+      // Token 模式 - Cloudflare token 是 base64 編碼的 JSON credentials
+      // 支援兩種鍵名格式：
+      //   新版：{"a":"accountTag","t":"tunnelID","s":"tunnelSecret"}
+      //   舊版：{"AccountTag":...,"TunnelID":...,"TunnelSecret":...}
+      let decoded;
       try {
-        const decoded = Buffer.from(authTrimmed, 'base64').toString('utf8');
-        if (!decoded.includes('TunnelSecret') || !decoded.includes('TunnelID')) {
-          console.error('ARGO_AUTH validation failed: decoded token missing TunnelSecret/TunnelID');
-          process.exit(1);
-        }
+        decoded = Buffer.from(authTrimmed, 'base64').toString('utf8');
       } catch (e) {
-        console.error('ARGO_AUTH validation failed: not valid base64 encoded credentials');
+        console.error('ARGO_AUTH validation failed: not valid base64');
         process.exit(1);
       }
+
+      let creds;
+      try {
+        creds = JSON.parse(decoded);
+      } catch (e) {
+        console.error('ARGO_AUTH validation failed: decoded token is not valid JSON');
+        console.error(`Decoded preview: ${decoded.slice(0, 120)}`);
+        process.exit(1);
+      }
+
+      // 取出各欄位（兼容短鍵 a/t/s 與長鍵）
+      const accountTag = creds.a || creds.AccountTag;
+      const tunnelID = creds.t || creds.TunnelID;
+      const tunnelSecret = creds.s || creds.TunnelSecret;
+
+      if (!accountTag || !tunnelID || !tunnelSecret) {
+        console.error('ARGO_AUTH validation failed: missing a/t/s (or AccountTag/TunnelID/TunnelSecret)');
+        console.error(`Decoded keys: ${Object.keys(creds).join(', ')}`);
+        process.exit(1);
+      }
+
+      console.log(`Token parsed OK: accountTag=${String(accountTag).slice(0,8)}... tunnelID=${tunnelID}`);
       argoArgs = `tunnel --no-autoupdate run --token ${authTrimmed}`;
       console.log('Mode: Permanent Tunnel (Token - base64 credentials)');
     } else {
