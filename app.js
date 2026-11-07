@@ -20,6 +20,28 @@ const ARGO_PORT = 8001;
 const XRAY_VERSION = process.env.XRAY_VERSION || 'v26.10.31';
 const CLOUDFLARED_VERSION = process.env.CLOUDFLARED_VERSION || '2026.10.7';
 
+// === ARGO_AUTH 除錯輸出（啟動時立即顯示，遮蔽敏感部分）===
+function debugArgoAuth() {
+  const raw = process.env.ARGO_AUTH || '';
+  const len = raw.length;
+  const trimmed = raw.trim();
+  const trimmedLen = trimmed.length;
+  const parts = trimmed.split('.');
+  const preview = len > 0 ? `${trimmed.slice(0, 15)}...${trimmed.slice(-10)}` : '(empty)';
+  
+  console.log('=== ARGO_AUTH Debug ===');
+  console.log(`Raw length: ${len}`);
+  console.log(`Trimmed length: ${trimmedLen}`);
+  console.log(`Parts (split by .): ${parts.length}`);
+  console.log(`Preview: ${preview}`);
+  console.log(`Starts with eyJ: ${trimmed.startsWith('eyJ')}`);
+  console.log(`Includes {: ${raw.includes('{')}`);
+  console.log(`Length > 100: ${len > 100}`);
+  console.log('=========================');
+  
+  return { raw, trimmed, parts };
+}
+
 if (!fs.existsSync(FILE_PATH)) {
   fs.mkdirSync(FILE_PATH, { recursive: true });
 }
@@ -102,22 +124,6 @@ async function downloadCloudflared(arch) {
   fs.chmodSync(botPath, 0o775);
 }
 
-// 驗證 JWT Token 格式
-function validateToken(token) {
-  const trimmed = token.trim();
-  const parts = trimmed.split('.');
-  if (parts.length !== 3) {
-    return { valid: false, error: `Invalid JWT format: expected 3 parts, got ${parts.length}` };
-  }
-  // 簡單檢查 base64url 格式
-  for (const part of parts) {
-    if (!/^[A-Za-z0-9_-]+$/.test(part)) {
-      return { valid: false, error: 'Invalid JWT character in token' };
-    }
-  }
-  return { valid: true, token: trimmed };
-}
-
 // 啟動 cloudflared 並驗證連線
 async function startCloudflared(argoArgs) {
   return new Promise((resolve, reject) => {
@@ -185,6 +191,9 @@ async function startCloudflared(argoArgs) {
 }
 
 async function startScripts() {
+  // 除錯：顯示 ARGO_AUTH 實際內容
+  const { trimmed, parts } = debugArgoAuth();
+  
   const arch = getSystemArchitecture();
   console.log(`Detected architecture: ${arch}`);
   
@@ -203,15 +212,24 @@ async function startScripts() {
     
     // 準備 cloudflared 參數
     let argoArgs;
-    if (ARGO_AUTH.includes('{') || ARGO_AUTH.length > 100) {
-      // Token 模式
-      const validation = validateToken(ARGO_AUTH);
-      if (!validation.valid) {
-        console.error('ARGO_AUTH validation failed:', validation.error);
+    // 使用 debugArgoAuth 回傳的 trimmed 和 parts，避免重複處理
+    const { trimmed: authTrimmed, parts: authParts } = debugArgoAuth();
+    const isTokenMode = ARGO_AUTH.includes('{') || ARGO_AUTH.length > 100;
+    
+    if (isTokenMode) {
+      // Token 模式 - 直接用已計算的值驗證
+      if (authParts.length !== 3) {
+        console.error(`ARGO_AUTH validation failed: Invalid JWT format: expected 3 parts, got ${authParts.length}`);
         console.error('Expected: JWT token (eyJ...) from Cloudflare Dashboard');
         process.exit(1);
       }
-      argoArgs = `tunnel --no-autoupdate run --token ${validation.token}`;
+      for (const part of authParts) {
+        if (!/^[A-Za-z0-9_-]+$/.test(part)) {
+          console.error('ARGO_AUTH validation failed: Invalid JWT character in token');
+          process.exit(1);
+        }
+      }
+      argoArgs = `tunnel --no-autoupdate run --token ${authTrimmed}`;
       console.log('Mode: Permanent Tunnel (Token)');
     } else {
       // Quick Tunnel 模式
