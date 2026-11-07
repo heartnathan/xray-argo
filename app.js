@@ -33,6 +33,7 @@ const botName = generateRandomName();
 let webPath = path.join(FILE_PATH, webName);
 let botPath = path.join(FILE_PATH, botName);
 let configPath = path.join(FILE_PATH, 'config.json');
+const logPath = path.join(FILE_PATH, 'cloudflared.log');
 
 // 生成 Xray 配置
 async function generateConfig() {
@@ -101,6 +102,88 @@ async function downloadCloudflared(arch) {
   fs.chmodSync(botPath, 0o775);
 }
 
+// 驗證 JWT Token 格式
+function validateToken(token) {
+  const trimmed = token.trim();
+  const parts = trimmed.split('.');
+  if (parts.length !== 3) {
+    return { valid: false, error: `Invalid JWT format: expected 3 parts, got ${parts.length}` };
+  }
+  // 簡單檢查 base64url 格式
+  for (const part of parts) {
+    if (!/^[A-Za-z0-9_-]+$/.test(part)) {
+      return { valid: false, error: 'Invalid JWT character in token' };
+    }
+  }
+  return { valid: true, token: trimmed };
+}
+
+// 啟動 cloudflared 並驗證連線
+async function startCloudflared(argoArgs) {
+  return new Promise((resolve, reject) => {
+    // 將 stderr 寫入 log 檔案，方便除錯
+    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+    const child = require('child_process').spawn(botPath, argoArgs.split(' '), {
+      stdio: ['ignore', 'pipe', logStream],
+      detached: true
+    });
+
+    child.unref(); // 讓父進程退出不影響子進程
+
+    let connected = false;
+    let output = '';
+
+    // 監控 stdout 判斷是否連線成功
+    child.stdout.on('data', (data) => {
+      const msg = data.toString();
+      output += msg;
+      console.log(`[cloudflared] ${msg.trim()}`);
+      
+      // 判斷連線成功的關鍵字
+      if (msg.includes('Connected to Cloudflare') || 
+          msg.includes('Starting tunnel') ||
+          msg.includes('Registered tunnel')) {
+        connected = true;
+      }
+    });
+
+    child.on('error', (err) => {
+      logStream.end();
+      reject(new Error(`cloudflared spawn error: ${err.message}`));
+    });
+
+    child.on('exit', (code) => {
+      logStream.end();
+      if (!connected && code !== 0) {
+        const logContent = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+        reject(new Error(`cloudflared exited with code ${code}. Log: ${logContent.slice(-500)}`));
+      }
+    });
+
+    // 等待最多 15 秒確認連線
+    const timeout = setTimeout(() => {
+      if (connected) {
+        console.log('cloudflared connected to Cloudflare successfully');
+        resolve();
+      } else {
+        const logContent = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+        console.error('cloudflared connection timeout. Recent log:');
+        console.error(logContent.slice(-1000));
+        reject(new Error('cloudflared failed to connect within 15s. Check ARGO_AUTH token and network.'));
+      }
+    }, 15000);
+
+    // 如果提前連線成功，清除 timeout
+    const checkInterval = setInterval(() => {
+      if (connected) {
+        clearTimeout(timeout);
+        clearInterval(checkInterval);
+        resolve();
+      }
+    }, 1000);
+  });
+}
+
 async function startScripts() {
   const arch = getSystemArchitecture();
   console.log(`Detected architecture: ${arch}`);
@@ -113,14 +196,31 @@ async function startScripts() {
     await downloadCloudflared(arch);
     
     console.log('Starting Xray...');
-    exec(`nohup ${webPath} -c ${configPath} >/dev/null 2>&1 &`);
+    require('child_process').spawn(webPath, ['-c', configPath], {
+      stdio: 'ignore',
+      detached: true
+    }).unref();
     
-    let argoArgs = ARGO_AUTH.includes('{') || ARGO_AUTH.length > 100
-      ? `tunnel --no-autoupdate run --token ${ARGO_AUTH}`
-      : `tunnel --no-autoupdate --url http://localhost:${ARGO_PORT}`;
+    // 準備 cloudflared 參數
+    let argoArgs;
+    if (ARGO_AUTH.includes('{') || ARGO_AUTH.length > 100) {
+      // Token 模式
+      const validation = validateToken(ARGO_AUTH);
+      if (!validation.valid) {
+        console.error('ARGO_AUTH validation failed:', validation.error);
+        console.error('Expected: JWT token (eyJ...) from Cloudflare Dashboard');
+        process.exit(1);
+      }
+      argoArgs = `tunnel --no-autoupdate run --token ${validation.token}`;
+      console.log('Mode: Permanent Tunnel (Token)');
+    } else {
+      // Quick Tunnel 模式
+      argoArgs = `tunnel --no-autoupdate --url http://localhost:${ARGO_PORT}`;
+      console.log('Mode: Quick Tunnel (TryCloudflare)');
+    }
     
     console.log('Starting cloudflared...');
-    exec(`nohup ${botPath} ${argoArgs} >/dev/null 2>&1 &`);
+    await startCloudflared(argoArgs);
     console.log("Services started successfully.");
   } catch (e) {
     console.error("Startup error:", e.message);
