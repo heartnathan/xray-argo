@@ -71,12 +71,33 @@ function generateRandomName() {
   return Math.random().toString(36).substring(2, 8);
 }
 
-const webName = generateRandomName();
-const botName = generateRandomName();
+// 這些會在每次啟動嘗試時重新指派唯一檔名，避免覆寫正在執行的二進位檔 (ETXTBSY)
+let webName = generateRandomName();
+let botName = generateRandomName();
 let webPath = path.join(FILE_PATH, webName);
 let botPath = path.join(FILE_PATH, botName);
 let configPath = path.join(FILE_PATH, 'config.json');
 const logPath = path.join(FILE_PATH, 'cloudflared.log');
+
+// 追蹤已啟動的子進程，重試前需先終止，避免檔案被占用與埠衝突
+let xrayProc = null;
+let cfProc = null;
+let binariesReady = false; // 二進位檔只下載一次，重試只重啟進程
+
+function killProcs() {
+  for (const [name, p] of [['xray', xrayProc], ['cloudflared', cfProc]]) {
+    if (p && p.pid) {
+      try {
+        process.kill(p.pid, 'SIGKILL');
+        console.log(`Killed previous ${name} process (pid ${p.pid})`);
+      } catch (_) {
+        // 進程可能已結束
+      }
+    }
+  }
+  xrayProc = null;
+  cfProc = null;
+}
 
 // 生成 Xray 配置
 async function generateConfig() {
@@ -155,6 +176,7 @@ async function startCloudflared(argoArgs) {
       detached: true
     });
 
+    cfProc = child; // 記錄以便重試前終止
     child.unref();
 
     let connected = false;
@@ -208,24 +230,42 @@ async function startCloudflared(argoArgs) {
 }
 
 async function startScripts() {
-  // 除錯：顯示 ARGO_AUTH 實際內容
-  const { trimmed, parts } = debugArgoAuth();
-  
   const arch = getSystemArchitecture();
-  console.log(`Detected architecture: ${arch}`);
-  
-  try {
+
+  // 先終止上一次嘗試遺留的進程，釋放檔案與埠
+  killProcs();
+  // 給被殺掉的舊進程一點時間釋放檔案/埠
+  await new Promise((r) => setTimeout(r, 1000));
+
+  // 二進位檔只下載一次；重試時沿用同一份，避免覆寫執行中的檔案 (ETXTBSY)
+  if (!binariesReady) {
+    const suffix = generateRandomName();
+    webName = `xray-${suffix}`;
+    botName = `bot-${suffix}`;
+    webPath = path.join(FILE_PATH, webName);
+    botPath = path.join(FILE_PATH, botName);
+
+    console.log(`Detected architecture: ${arch}`);
+    console.log(`Using binary names: ${webName}, ${botName}`);
+
     console.log('Downloading Xray...');
     await downloadAndExtractXray(arch);
-    
+
     console.log('Downloading cloudflared...');
     await downloadCloudflared(arch);
-    
+
+    binariesReady = true;
+  } else {
+    console.log('Binaries already downloaded, reusing.');
+  }
+
+  try {
     console.log('Starting Xray...');
-    require('child_process').spawn(webPath, ['-c', configPath], {
+    xrayProc = require('child_process').spawn(webPath, ['-c', configPath], {
       stdio: 'ignore',
       detached: true
-    }).unref();
+    });
+    xrayProc.unref();
     
     // 準備 cloudflared 參數
     let argoArgs;
