@@ -127,25 +127,23 @@ async function downloadCloudflared(arch) {
 // 啟動 cloudflared 並驗證連線
 async function startCloudflared(argoArgs) {
   return new Promise((resolve, reject) => {
-    // 將 stderr 寫入 log 檔案，方便除錯
-    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+    // 開啟 log 檔案
+    const logFd = fs.openSync(logPath, 'a');
     const child = require('child_process').spawn(botPath, argoArgs.split(' '), {
-      stdio: ['ignore', 'pipe', logStream],
+      stdio: ['ignore', 'pipe', logFd],  // 使用檔案描述符而非 WriteStream
       detached: true
     });
 
-    child.unref(); // 讓父進程退出不影響子進程
+    child.unref();
 
     let connected = false;
     let output = '';
 
-    // 監控 stdout 判斷是否連線成功
     child.stdout.on('data', (data) => {
       const msg = data.toString();
       output += msg;
       console.log(`[cloudflared] ${msg.trim()}`);
       
-      // 判斷連線成功的關鍵字
       if (msg.includes('Connected to Cloudflare') || 
           msg.includes('Starting tunnel') ||
           msg.includes('Registered tunnel')) {
@@ -154,19 +152,18 @@ async function startCloudflared(argoArgs) {
     });
 
     child.on('error', (err) => {
-      logStream.end();
+      fs.closeSync(logFd);
       reject(new Error(`cloudflared spawn error: ${err.message}`));
     });
 
     child.on('exit', (code) => {
-      logStream.end();
+      fs.closeSync(logFd);
       if (!connected && code !== 0) {
         const logContent = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
         reject(new Error(`cloudflared exited with code ${code}. Log: ${logContent.slice(-500)}`));
       }
     });
 
-    // 等待最多 15 秒確認連線
     const timeout = setTimeout(() => {
       if (connected) {
         console.log('cloudflared connected to Cloudflare successfully');
@@ -179,7 +176,6 @@ async function startCloudflared(argoArgs) {
       }
     }, 15000);
 
-    // 如果提前連線成功，清除 timeout
     const checkInterval = setInterval(() => {
       if (connected) {
         clearTimeout(timeout);
@@ -217,7 +213,13 @@ async function startScripts() {
     const isTokenMode = ARGO_AUTH.includes('{') || ARGO_AUTH.length > 100;
     
     if (isTokenMode) {
-      // Token 模式 - 直接用已計算的值驗證
+      // Token 模式 - 檢查是否為空
+      if (!authTrimmed) {
+        console.error('ARGO_AUTH is empty! Token mode requires ARGO_AUTH environment variable.');
+        console.error('Set ARGO_AUTH=eyJ... (JWT token from Cloudflare Dashboard)');
+        process.exit(1);
+      }
+      // 直接用已計算的值驗證
       if (authParts.length !== 3) {
         console.error(`ARGO_AUTH validation failed: Invalid JWT format: expected 3 parts, got ${authParts.length}`);
         console.error('Expected: JWT token (eyJ...) from Cloudflare Dashboard');
