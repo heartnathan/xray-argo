@@ -8,7 +8,7 @@ RUN apk update && apk --no-cache add curl bash
 
 # 複製 package.json 並安裝依賴（利用 Docker 快取）
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm install --omit=dev
 
 # 複製應用程式碼
 COPY . .
