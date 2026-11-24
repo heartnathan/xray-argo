@@ -22,7 +22,7 @@ const CLOUDFLARED_VERSION = process.env.CLOUDFLARED_VERSION || '2026.10.7';
 
 // === ARGO_AUTH 除錯輸出（啟動時立即顯示，遮蔽敏感部分）===
 function debugArgoAuth() {
-  const raw = process.env.ARGO_AUTH || '';
+  const raw = ARGO_AUTH || '';
   const len = raw.length;
   const trimmed = raw.trim();
   const trimmedLen = trimmed.length;
@@ -103,7 +103,7 @@ function killProcs() {
 // 生成 Xray 配置
 async function generateConfig() {
   const config = {
-    log: { access: '/dev/null', error: '/dev/null', loglevel: 'none' },
+    log: { access: 'none', loglevel: 'warning' },
     inbounds: [
       { 
         port: ARGO_PORT, 
@@ -126,10 +126,13 @@ function getSystemArchitecture() {
 
 async function downloadFile(fileName, fileUrl) {
   console.log(`Downloading from ${fileUrl}...`);
-  const res = await axios({ method: 'get', url: fileUrl, responseType: 'stream', timeout: 120000 });
-  res.data.pipe(fs.createWriteStream(fileName));
+  const res = await axios({ method: 'get', url: fileUrl, responseType: 'stream', timeout: 120000, maxRedirects: 10 });
+  const writer = fs.createWriteStream(fileName);
+  res.data.pipe(writer);
+  // 等檔案真正寫完（finish），而不是來源串流結束（end），避免讀到不完整的 zip/二進位檔
   return new Promise((resolve, reject) => {
-    res.data.on('end', resolve);
+    writer.on('finish', resolve);
+    writer.on('error', reject);
     res.data.on('error', reject);
   });
 }
@@ -168,72 +171,53 @@ async function downloadCloudflared(arch) {
 }
 
 // 啟動 cloudflared 並驗證連線
+// cloudflared 的日誌（含連線成功訊息與 trycloudflare 網址）都輸出在 stderr，所以 stdout/stderr 都要監聽
 async function startCloudflared(argoArgs) {
   return new Promise((resolve, reject) => {
-    // 開啟 log 檔案
-    const logFd = fs.openSync(logPath, 'a');
+    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
     const child = require('child_process').spawn(botPath, argoArgs.split(' '), {
-      stdio: ['ignore', 'pipe', logFd],  // 使用檔案描述符而非 WriteStream
+      stdio: ['ignore', 'pipe', 'pipe'],
       detached: true
     });
 
-    cfProc = child; // 記錄以便重試前終止
+    cfProc = child;
     child.unref();
 
-    let connected = false;
-    let output = '';
+    let settled = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (err) reject(err); else resolve();
+    };
 
-    child.stdout.on('data', (data) => {
+    const onData = (data) => {
       const msg = data.toString();
-      output += msg;
-      console.log(`[cloudflared] ${msg.trim()}`);
-
-      // Quick Tunnel：抓取 trycloudflare 域名，供訂閱連結使用
+      logStream.write(msg);
+      for (const line of msg.split('\n')) {
+        if (line.trim()) console.log(`[cloudflared] ${line.trim()}`);
+      }
       const m = msg.match(/https:\/\/([a-z0-9-]+\.trycloudflare\.com)/i);
       if (m) {
         runtimeDomain = m[1];
         console.log(`Detected quick tunnel domain: ${runtimeDomain}`);
       }
-
-      if (msg.includes('Connected to Cloudflare') || 
-          msg.includes('Starting tunnel') ||
-          msg.includes('Registered tunnel')) {
-        connected = true;
+      if (/Registered tunnel connection|Connection [0-9a-f-]+ registered/i.test(msg)) {
+        console.log('cloudflared connected to Cloudflare successfully');
+        finish();
       }
-    });
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
 
-    child.on('error', (err) => {
-      fs.closeSync(logFd);
-      reject(new Error(`cloudflared spawn error: ${err.message}`));
-    });
-
+    child.on('error', (err) => finish(new Error(`cloudflared spawn error: ${err.message}`)));
     child.on('exit', (code) => {
-      fs.closeSync(logFd);
-      if (!connected && code !== 0) {
-        const logContent = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
-        reject(new Error(`cloudflared exited with code ${code}. Log: ${logContent.slice(-500)}`));
-      }
+      finish(new Error(`cloudflared exited with code ${code}. See ${logPath}`));
     });
 
     const timeout = setTimeout(() => {
-      if (connected) {
-        console.log('cloudflared connected to Cloudflare successfully');
-        resolve();
-      } else {
-        const logContent = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
-        console.error('cloudflared connection timeout. Recent log:');
-        console.error(logContent.slice(-1000));
-        reject(new Error('cloudflared failed to connect within 15s. Check ARGO_AUTH token and network.'));
-      }
-    }, 15000);
-
-    const checkInterval = setInterval(() => {
-      if (connected) {
-        clearTimeout(timeout);
-        clearInterval(checkInterval);
-        resolve();
-      }
-    }, 1000);
+      finish(new Error('cloudflared failed to connect within 30s. Check ARGO_AUTH token and network.'));
+    }, 30000);
   });
 }
 
@@ -269,11 +253,17 @@ async function startScripts() {
 
   try {
     console.log('Starting Xray...');
-    xrayProc = require('child_process').spawn(webPath, ['-c', configPath], {
-      stdio: 'ignore',
+    xrayProc = require('child_process').spawn(webPath, ['run', '-c', configPath], {
+      stdio: ['ignore', 'inherit', 'inherit'],
       detached: true
     });
     xrayProc.unref();
+    // 等 2 秒確認 Xray 沒有立即退出（例如設定錯誤或埠被占用）
+    await new Promise((r) => setTimeout(r, 2000));
+    if (xrayProc.exitCode !== null) {
+      throw new Error(`Xray exited immediately with code ${xrayProc.exitCode}`);
+    }
+    console.log('Xray started.');
     
     // 準備 cloudflared 參數
     let argoArgs;
